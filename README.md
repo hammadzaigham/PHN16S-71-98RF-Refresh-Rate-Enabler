@@ -1,22 +1,20 @@
 # PHN16S-71-98RF Refresh Rate Enabler
 
-Adds 60, 75, 100, 120, 144, and 165 Hz on the Acer Predator Helios Neo 16S (PHN16S-71-98RF). Your original 240 Hz mode stays available and preferred.
+Adds 60, 75, 100, 120, 144, and 165 Hz on the Acer Predator Helios Neo 16S (PHN16S-71-98RF).
 
-On the Intel GPU, Windows lists every mode: 240 Hz, 165.02 Hz, 144 Hz, 120 Hz, 100.01 Hz, 75 Hz, and 60 Hz. 240 Hz stays selected.
+On the Intel GPU, Windows lists every mode: 240 Hz, 165.02 Hz, 144 Hz, 120 Hz, 100.01 Hz, 75 Hz, and 60 Hz.
 
 ![Every refresh rate on the Intel GPU](pics/Screenshot%202026-10-22%20201044.png)
 
 The laptop has an Intel GPU and an NVIDIA GeForce RTX 5070 Ti Laptop GPU. Add the rates once for each GPU.
 
-You need Windows 11 and the .NET 10 desktop runtime. The app asks for administrator approval.
-
-Download [v1.0.0](https://github.com/hammadzaigham/PHN16S-71-98RF-Refresh-Rate-Enabler/releases/tag/v1.0.0). It needs the .NET 10 desktop runtime.
+You need Windows 11 and the .NET 10 desktop runtime. The app asks for administrator approval. Download [v1.0.0](https://github.com/hammadzaigham/PHN16S-71-98RF-Refresh-Rate-Enabler/releases/tag/v1.0.0).
 
 ## How to use
 
 **1 — Select your GPU**
 
-Switch to the Intel or NVIDIA mode you want to set up first.
+Switch to the either the Intel or NVIDIA GPU, whichever you want to set up first.
 
 **2 — Add refresh rates**
 
@@ -34,6 +32,7 @@ Switch to the other GPU, then click **Refresh**. Click **Add refresh rates** aga
 **5 — Choose a refresh rate**
 
 Open **Windows Settings → System → Display → Advanced display**. Choose a refresh rate, and confirm if Windows asks.
+
 
 ## Troubleshooting
 
