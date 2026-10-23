@@ -10,7 +10,7 @@ The laptop has an Intel GPU and an NVIDIA GeForce RTX 5070 Ti Laptop GPU. Add th
 
 You need Windows 11 and the .NET 10 desktop runtime. The app asks for administrator approval.
 
-Download the newest build from the [Actions](https://github.com/hammadzaigham/PHN16S-71-98RF-Refresh-Rate-Enabler/actions) artifacts after a successful run.
+Download [v1.0.0](https://github.com/hammadzaigham/PHN16S-71-98RF-Refresh-Rate-Enabler/releases/tag/v1.0.0). It needs the .NET 10 desktop runtime.
 
 ## How to use
 

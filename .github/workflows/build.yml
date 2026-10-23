@@ -2,7 +2,11 @@ name: Build
 
 on:
   push:
+    branches: [main]
   pull_request:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -30,3 +34,19 @@ jobs:
         with:
           name: PHN16S-71-98RF Refresh Rate Enabler
           path: dist/PHN16S-71-98RF Refresh Rate Enabler.exe
+
+      - name: Publish v1.0.0
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $exe = "dist/PHN16S-71-98RF Refresh Rate Enabler.exe"
+          $exists = $false
+          gh release view v1.0.0 *> $null
+          if ($LASTEXITCODE -eq 0) { $exists = $true }
+          if (-not $exists) {
+            gh release create v1.0.0 $exe --title "v1.0.0" --notes "First release of the PHN16S-71-98RF Refresh Rate Enabler. Requires the .NET 10 desktop runtime."
+          } else {
+            gh release upload v1.0.0 $exe --clobber
+          }
