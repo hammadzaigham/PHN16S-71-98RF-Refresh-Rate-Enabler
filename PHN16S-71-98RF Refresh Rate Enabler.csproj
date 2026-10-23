@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <StartupObject>Program</StartupObject>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AssemblyName>PHN16S-71-98RF Refresh Rate Enabler</AssemblyName>
+    <RootNamespace>PHN16S7198RFRefreshRateEnabler</RootNamespace>
+    <PlatformTarget>x64</PlatformTarget>
+    <ApplicationTitle>PHN16S-71-98RF Refresh Rate Enabler</ApplicationTitle>
+  </PropertyGroup>
+</Project>

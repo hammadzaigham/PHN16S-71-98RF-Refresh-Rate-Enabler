@@ -1,0 +1,32 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Compile
+        run: >
+          dotnet publish "PHN16S-71-98RF Refresh Rate Enabler.csproj"
+          -c Release
+          -r win-x64
+          --self-contained false
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:DebugType=None
+          -p:DebugSymbols=false
+          -o dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PHN16S-71-98RF Refresh Rate Enabler
+          path: dist/PHN16S-71-98RF Refresh Rate Enabler.exe
