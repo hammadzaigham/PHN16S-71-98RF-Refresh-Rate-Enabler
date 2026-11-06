@@ -74,3 +74,31 @@ At 60 Hz, brightness can flicker a little because of the panel's PWM dimming. Wi
 165.02 Hz. Windows shows 165.02 Hz. The desktop mode and the active signal match.
 
 ![Intel at 165 Hz](pics/Screenshot%202026-10-22%20194843.png)
+
+
+---
+
+## Linux Support
+
+A Linux port [`phn16s_refresh_enabler.py`](phn16s_refresh_enabler.py) is included to enable **60, 75, 100, 120, 144, 165, and 240 Hz** on Linux kernels via DRM EDID firmware override.
+
+### How to use on Linux
+
+1. **Check detected panel and calculate timings:**
+   ```bash
+   python3 phn16s_refresh_enabler.py --check
+   ```
+
+2. **Install all refresh rates:**
+   ```bash
+   sudo python3 phn16s_refresh_enabler.py --install
+   ```
+   This generates the multi-block DisplayID 2.0 EDID firmware (`/lib/firmware/edid/edid-phn16s.bin`), sets `drm.edid_firmware=eDP-1:edid/edid-phn16s.bin` in GRUB via `grubby`, and rebuilds your initramfs via `dracut`.
+
+3. **Reboot your system.**
+   After rebooting, all refresh rates (60 Hz, 75 Hz, 100 Hz, 120 Hz, 144 Hz, 165.02 Hz, 240 Hz) will be listed in KDE System Settings (or GNOME Display settings).
+
+4. **To revert / uninstall:**
+   ```bash
+   sudo python3 phn16s_refresh_enabler.py --uninstall
+   ```
