@@ -82,6 +82,10 @@ At 60 Hz, brightness can flicker a little because of the panel's PWM dimming. Wi
 
 A Linux port [`phn16s_refresh_enabler.py`](phn16s_refresh_enabler.py) is included to enable **60, 75, 100, 120, 144, 165, and 240 Hz** on Linux kernels via DRM EDID firmware override.
 
+It supports both:
+- **Hybrid / iGPU Mode** (`eDP-1` via Intel)
+- **Discrete MUX / NVIDIA GPU Only Mode** (`eDP-2` via NVIDIA dGPU)
+
 ### How to use on Linux
 
 1. **Check detected panel and calculate timings:**
@@ -89,14 +93,18 @@ A Linux port [`phn16s_refresh_enabler.py`](phn16s_refresh_enabler.py) is include
    python3 phn16s_refresh_enabler.py --check
    ```
 
-2. **Install all refresh rates:**
+2. **Install all refresh rates (for both Hybrid and Discrete MUX modes):**
    ```bash
    sudo python3 phn16s_refresh_enabler.py --install
    ```
-   This generates the multi-block DisplayID 2.0 EDID firmware (`/lib/firmware/edid/edid-phn16s.bin`), sets `drm.edid_firmware=eDP-1:edid/edid-phn16s.bin` in GRUB via `grubby`, and rebuilds your initramfs via `dracut`.
+   This:
+   - Generates the multi-block DisplayID 2.0 EDID firmware (`/lib/firmware/edid/edid-phn16s.bin`).
+   - Configures `drm.edid_firmware=eDP-1:edid/edid-phn16s.bin,eDP-2:edid/edid-phn16s.bin` in GRUB via `grubby`.
+   - Enables `nvidia-drm.modeset=1` and `nvidia_drm.fbdev=1` for early modesetting on the dGPU.
+   - Rebuilds your initramfs via `dracut`.
 
 3. **Reboot your system.**
-   After rebooting, all refresh rates (60 Hz, 75 Hz, 100 Hz, 120 Hz, 144 Hz, 165.02 Hz, 240 Hz) will be listed in KDE System Settings (or GNOME Display settings).
+   After rebooting, all refresh rates (60 Hz, 75 Hz, 100 Hz, 120 Hz, 144 Hz, 165.02 Hz, 240 Hz) will be listed in KDE System Settings (or GNOME Display settings) whether you boot on Intel or switch to **NVIDIA GPU Only** in BIOS.
 
 4. **To revert / uninstall:**
    ```bash

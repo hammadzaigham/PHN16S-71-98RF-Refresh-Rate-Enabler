@@ -5,6 +5,7 @@ Acer Predator Helios Neo 16S (Samsung ATNA60DL03-0 2560x1600 OLED panel)
 
 Adds native 60, 75, 100, 120, 144, and 165 Hz refresh rate modes via DisplayID 2.0
 Type VII timing descriptor extensions in a kernel firmware EDID override.
+Supports both Hybrid/iGPU (eDP-1) and Discrete MUX / NVIDIA GPU Only (eDP-2) modes.
 """
 
 import os
@@ -19,6 +20,9 @@ STAGED_RATES = [60, 75, 100, 120, 144, 165]
 FIRMWARE_DIR = "/lib/firmware/edid"
 FIRMWARE_FILE = "edid-phn16s.bin"
 FIRMWARE_PATH = os.path.join(FIRMWARE_DIR, FIRMWARE_FILE)
+# Default connectors to bind: covers both Intel/iGPU (eDP-1) and Discrete MUX / NVIDIA (eDP-2)
+DEFAULT_CONNECTORS = ["eDP-1", "eDP-2"]
+NVIDIA_KPARAMS = ["nvidia-drm.modeset=1", "nvidia_drm.fbdev=1"]
 
 
 def block_checksum(data, offset):
@@ -210,13 +214,12 @@ def generate_overridden_edid(source_edid, target_rates=STAGED_RATES):
 
 
 def find_edp_connector():
-    connectors = glob.glob("/sys/class/drm/*-eDP-*/status") + glob.glob("/sys/class/drm/*-eDP/status")
+    connectors = glob.glob("/sys/class/drm/*-eDP-*/status") + glob.glob("/sys/class/drm/*-eDP*/status")
     for conn in sorted(connectors):
         try:
             with open(conn, "r") as f:
                 if f.read().strip() == "connected":
                     dir_name = os.path.dirname(conn)
-                    # Extract connector name e.g. eDP-1 from card1-eDP-1
                     base = os.path.basename(dir_name)
                     conn_name = base.split("-", 1)[1] if "-" in base else base
                     edid_file = os.path.join(dir_name, "edid")
@@ -235,7 +238,7 @@ def get_current_kernel():
     return res.stdout.strip()
 
 
-def install_override(edid_bytes, connector_name):
+def install_override(edid_bytes, connectors=DEFAULT_CONNECTORS):
     if os.geteuid() != 0:
         print("ERROR: Root privileges required. Run with sudo.")
         sys.exit(1)
@@ -245,7 +248,7 @@ def install_override(edid_bytes, connector_name):
         f.write(edid_bytes)
     print(f"Written {len(edid_bytes)} bytes to {FIRMWARE_PATH}")
 
-    # Configure dracut to bundle the firmware
+    # Configure dracut to bundle the firmware into initramfs
     dracut_conf_dir = "/etc/dracut.conf.d"
     os.makedirs(dracut_conf_dir, exist_ok=True)
     dracut_conf_path = os.path.join(dracut_conf_dir, "99-edid-phn16s.conf")
@@ -253,27 +256,38 @@ def install_override(edid_bytes, connector_name):
         f.write(f'install_items+=" {FIRMWARE_PATH} "\n')
     print(f"Created dracut config: {dracut_conf_path}")
 
-    # Add kernel parameter via grubby
-    param_edid = f"drm.edid_firmware={connector_name}:edid/{FIRMWARE_FILE}"
-    print(f"Setting kernel argument: {param_edid}")
-    subprocess.run(["grubby", "--update-kernel=ALL", f"--args={param_edid}"], check=True)
+    # Clean up any previous single-connector parameter first
+    subprocess.run(["grubby", "--update-kernel=ALL", "--remove-args=drm.edid_firmware"], check=False)
+
+    # Bind EDID firmware to all specified connectors (e.g. eDP-1:edid/...,eDP-2:edid/...)
+    edid_specs = [f"{conn}:edid/{FIRMWARE_FILE}" for conn in connectors]
+    param_edid = f"drm.edid_firmware={','.join(edid_specs)}"
+    
+    # Bundle NVIDIA early modesetting flags to support Discrete MUX mode seamlessly
+    new_args = [param_edid] + NVIDIA_KPARAMS
+    args_str = " ".join(new_args)
+    print(f"Setting kernel boot arguments:\n  {args_str}")
+    subprocess.run(["grubby", "--update-kernel=ALL", f"--args={args_str}"], check=True)
 
     # Rebuild initramfs for current kernel using dracut
     kver = get_current_kernel()
     print(f"Rebuilding initramfs for kernel {kver} via dracut...")
     subprocess.run(["dracut", "-f", "--kver", kver], check=True)
     print("Initramfs updated successfully.")
-    print("\n[SUCCESS] Refresh rates installed! Reboot to activate all modes (60, 75, 100, 120, 144, 165, 240 Hz).")
+    print(f"\n[SUCCESS] Refresh rates installed for connectors: {', '.join(connectors)}")
+    print("NVIDIA discrete MUX modesetting flags (modeset=1, fbdev=1) are also active.")
+    print("Reboot to activate in either Hybrid or NVIDIA GPU Only BIOS mode!")
 
 
-def uninstall_override(connector_name):
+def uninstall_override(connectors=DEFAULT_CONNECTORS):
     if os.geteuid() != 0:
         print("ERROR: Root privileges required. Run with sudo.")
         sys.exit(1)
 
-    param_edid = f"drm.edid_firmware={connector_name}:edid/{FIRMWARE_FILE}"
-    print(f"Removing kernel argument: {param_edid}")
-    subprocess.run(["grubby", "--update-kernel=ALL", f"--remove-args={param_edid}"], check=False)
+    print("Removing kernel arguments...")
+    subprocess.run(["grubby", "--update-kernel=ALL", "--remove-args=drm.edid_firmware"], check=False)
+    for param in NVIDIA_KPARAMS:
+        subprocess.run(["grubby", "--update-kernel=ALL", f"--remove-args={param}"], check=False)
 
     dracut_conf_path = "/etc/dracut.conf.d/99-edid-phn16s.conf"
     if os.path.exists(dracut_conf_path):
@@ -287,31 +301,31 @@ def uninstall_override(connector_name):
     kver = get_current_kernel()
     print(f"Rebuilding initramfs for kernel {kver}...")
     subprocess.run(["dracut", "-f", "--kver", kver], check=True)
-    print("\n[SUCCESS] Custom EDID removed. Stock display configuration restored.")
+    print("\n[SUCCESS] Custom EDID and kernel parameters removed. Stock display configuration restored.")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="PHN16S-71-98RF Refresh Rate Enabler for Linux")
+    parser = argparse.ArgumentParser(description="PHN16S-71-98RF Refresh Rate Enabler for Linux (Hybrid & NVIDIA Only MUX)")
     parser.add_argument("--check", action="store_true", help="Inspect current panel EDID and calculate timings")
-    parser.add_argument("--install", action="store_true", help="Generate custom EDID and install kernel parameter & initramfs")
-    parser.add_argument("--uninstall", action="store_true", help="Remove kernel parameter and restore stock EDID")
+    parser.add_argument("--install", action="store_true", help="Generate custom EDID and install kernel parameters & initramfs")
+    parser.add_argument("--uninstall", action="store_true", help="Remove kernel parameters and restore stock EDID")
     parser.add_argument("--edid-in", help="Optional path to source EDID binary")
-    parser.add_argument("--connector", help="Display connector name (default: auto-detected eDP-1)")
+    parser.add_argument("--connectors", default="eDP-1,eDP-2", help="Comma-separated display connectors to bind (default: eDP-1,eDP-2)")
     args = parser.parse_args()
 
     conn_name, edid_sys_path = find_edp_connector()
-    if args.connector:
-        conn_name = args.connector
-
     source_path = args.edid_in or edid_sys_path
     if not source_path or not os.path.exists(source_path):
         print("Error: Could not locate eDP panel EDID. Use --edid-in <path> to specify manually.")
         sys.exit(1)
 
+    target_connectors = [c.strip() for c in args.connectors.split(",") if c.strip()]
+
     with open(source_path, "rb") as f:
         source_edid = f.read()
 
-    print(f"Detected eDP connector: {conn_name}")
+    print(f"Detected active display connector: {conn_name}")
+    print(f"Configured target connectors: {', '.join(target_connectors)}")
     print(f"Read {len(source_edid)} bytes from {source_path}")
 
     custom_edid = generate_overridden_edid(source_edid)
@@ -322,9 +336,9 @@ def main():
         return
 
     if args.install:
-        install_override(custom_edid, conn_name)
+        install_override(custom_edid, target_connectors)
     elif args.uninstall:
-        uninstall_override(conn_name)
+        uninstall_override(target_connectors)
     else:
         parser.print_help()
 
