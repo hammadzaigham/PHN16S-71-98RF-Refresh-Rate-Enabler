@@ -5,7 +5,7 @@ Acer Predator Helios Neo 16S (Samsung ATNA60DL03-0 2560x1600 OLED panel)
 
 Adds native 60, 75, 100, 120, 144, and 165 Hz refresh rate modes via DisplayID 2.0
 Type VII timing descriptor extensions in a kernel firmware EDID override.
-Supports both Hybrid/iGPU (eDP-1) and Discrete MUX / NVIDIA GPU Only (eDP-2) modes.
+The override is Intel-only in Hybrid mode. NVIDIA-only keeps the stock EDID.
 """
 
 import os
@@ -15,13 +15,14 @@ import math
 import shutil
 import subprocess
 import argparse
+import re
 
 STAGED_RATES = [60, 75, 100, 120, 144, 165]
 FIRMWARE_DIR = "/lib/firmware/edid"
 FIRMWARE_FILE = "edid-phn16s.bin"
 FIRMWARE_PATH = os.path.join(FIRMWARE_DIR, FIRMWARE_FILE)
-# Default connectors to bind: covers both Intel/iGPU (eDP-1) and Discrete MUX / NVIDIA (eDP-2)
-DEFAULT_CONNECTORS = ["eDP-1", "eDP-2"]
+# Intel owns eDP-1 in Hybrid; NVIDIA may reuse that name in discrete mode.
+DEFAULT_CONNECTORS = ["eDP-1"]
 NVIDIA_KPARAMS = ["nvidia-drm.modeset=1", "nvidia_drm.fbdev=1"]
 
 
@@ -243,6 +244,13 @@ def install_override(edid_bytes, connectors=DEFAULT_CONNECTORS):
         print("ERROR: Root privileges required. Run with sudo.")
         sys.exit(1)
 
+    if list(connectors) != DEFAULT_CONNECTORS:
+        raise ValueError("Intel-only installation supports eDP-1; NVIDIA must retain stock EDID")
+    module_source = os.path.join(os.path.dirname(os.path.abspath(__file__)), "linux", "dracut", "91preysense-edid")
+    for name in ("module-setup.sh", "intel-edid.sh"):
+        if not os.path.isfile(os.path.join(module_source, name)):
+            raise RuntimeError("Intel-only dracut module missing; clone the complete repository")
+
     os.makedirs(FIRMWARE_DIR, exist_ok=True)
     with open(FIRMWARE_PATH, "wb") as f:
         f.write(edid_bytes)
@@ -259,24 +267,35 @@ def install_override(edid_bytes, connectors=DEFAULT_CONNECTORS):
     # Clean up any previous single-connector parameter first
     subprocess.run(["grubby", "--update-kernel=ALL", "--remove-args=drm.edid_firmware"], check=False)
 
-    # Bind EDID firmware to all specified connectors (e.g. eDP-1:edid/...,eDP-2:edid/...)
-    edid_specs = [f"{conn}:edid/{FIRMWARE_FILE}" for conn in connectors]
-    param_edid = f"drm.edid_firmware={','.join(edid_specs)}"
-    
-    # Bundle NVIDIA early modesetting flags to support Discrete MUX mode seamlessly
-    new_args = [param_edid] + NVIDIA_KPARAMS
-    args_str = " ".join(new_args)
-    print(f"Setting kernel boot arguments:\n  {args_str}")
-    subprocess.run(["grubby", "--update-kernel=ALL", f"--args={args_str}"], check=True)
+    # Connector numbering changes with the MUX. Select Intel-only at early boot.
+    module_source = os.path.join(os.path.dirname(os.path.abspath(__file__)), "linux", "dracut", "91preysense-edid")
+    module_target = "/usr/lib/dracut/modules.d/91preysense-edid"
+    if not os.path.isdir(module_source):
+        raise RuntimeError("Intel-only dracut module missing; reinstall the complete project")
+    os.makedirs(module_target, exist_ok=True)
+    for name in ("module-setup.sh", "intel-edid.sh"):
+        shutil.copy2(os.path.join(module_source, name), os.path.join(module_target, name))
+        os.chmod(os.path.join(module_target, name), 0o755)
+    with open(dracut_conf_path, "w") as f:
+        f.write('add_dracutmodules+=" preysense-edid "\n')
+        f.write(f'install_items+=" {FIRMWARE_PATH} "\n')
+    # Keep future kernels from inheriting the old unconditional override.
+    for filename in ("/etc/default/grub", "/etc/kernel/cmdline"):
+        if os.path.isfile(filename):
+            with open(filename) as f: text = f.read()
+            text = re.sub(r" ?drm\.edid_firmware=[^\s\"']+", "", text)
+            with open(filename, "w") as f: f.write(text)
+    subprocess.run(["grubby", "--update-kernel=ALL", "--args=" + " ".join(NVIDIA_KPARAMS)], check=True)
+    print("EDID patch restricted to Intel boot display; NVIDIA uses its stock EDID.")
 
     # Rebuild initramfs for current kernel using dracut
     kver = get_current_kernel()
     print(f"Rebuilding initramfs for kernel {kver} via dracut...")
     subprocess.run(["dracut", "-f", "--kver", kver], check=True)
     print("Initramfs updated successfully.")
-    print(f"\n[SUCCESS] Refresh rates installed for connectors: {', '.join(connectors)}")
+    print("\n[SUCCESS] Extra refresh rates installed for Intel eDP-1 in Hybrid mode.")
     print("NVIDIA discrete MUX modesetting flags (modeset=1, fbdev=1) are also active.")
-    print("Reboot to activate in either Hybrid or NVIDIA GPU Only BIOS mode!")
+    print("Reboot to activate extra refresh rates in Hybrid; NVIDIA-only keeps native timings.")
 
 
 def uninstall_override(connectors=DEFAULT_CONNECTORS):
@@ -298,6 +317,8 @@ def uninstall_override(connectors=DEFAULT_CONNECTORS):
         os.remove(FIRMWARE_PATH)
         print(f"Removed {FIRMWARE_PATH}")
 
+    shutil.rmtree("/usr/lib/dracut/modules.d/91preysense-edid", ignore_errors=True)
+
     kver = get_current_kernel()
     print(f"Rebuilding initramfs for kernel {kver}...")
     subprocess.run(["dracut", "-f", "--kver", kver], check=True)
@@ -305,13 +326,17 @@ def uninstall_override(connectors=DEFAULT_CONNECTORS):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="PHN16S-71-98RF Refresh Rate Enabler for Linux (Hybrid & NVIDIA Only MUX)")
+    parser = argparse.ArgumentParser(description="PHN16S-71-98RF Refresh Rate Enabler for Linux (Intel-only override)")
     parser.add_argument("--check", action="store_true", help="Inspect current panel EDID and calculate timings")
     parser.add_argument("--install", action="store_true", help="Generate custom EDID and install kernel parameters & initramfs")
     parser.add_argument("--uninstall", action="store_true", help="Remove kernel parameters and restore stock EDID")
     parser.add_argument("--edid-in", help="Optional path to source EDID binary")
-    parser.add_argument("--connectors", default="eDP-1,eDP-2", help="Comma-separated display connectors to bind (default: eDP-1,eDP-2)")
+    parser.add_argument("--connectors", default="eDP-1", help="Intel panel connector (only eDP-1 is supported)")
     args = parser.parse_args()
+
+    if args.uninstall:
+        uninstall_override()
+        return
 
     conn_name, edid_sys_path = find_edp_connector()
     source_path = args.edid_in or edid_sys_path

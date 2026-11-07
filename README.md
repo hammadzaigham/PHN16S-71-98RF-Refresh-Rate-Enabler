@@ -82,9 +82,13 @@ At 60 Hz, brightness can flicker a little because of the panel's PWM dimming. Wi
 
 A Linux port [`phn16s_refresh_enabler.py`](phn16s_refresh_enabler.py) is included to enable **60, 75, 100, 120, 144, 165, and 240 Hz** on Linux kernels via DRM EDID firmware override.
 
-It supports both:
-- **Hybrid / iGPU Mode** (`eDP-1` via Intel)
-- **Discrete MUX / NVIDIA GPU Only Mode** (`eDP-2` via NVIDIA dGPU)
+Extra rates apply only in **Hybrid / iGPU mode** (`eDP-1` via Intel).
+**NVIDIA GPU Only** retains the original panel EDID and native 240 Hz mode.
+The custom EDID caused a black display on the tested NVIDIA-only configuration.
+
+Clone the complete repository, including `linux/dracut/91preysense-edid`; the
+Python script alone is not sufficient. This installer requires Fedora-style
+`grubby` and `dracut`.
 
 ### How to use on Linux
 
@@ -93,20 +97,30 @@ It supports both:
    python3 phn16s_refresh_enabler.py --check
    ```
 
-2. **Install all refresh rates (for both Hybrid and Discrete MUX modes):**
+2. **Install the extra Intel refresh rates:**
    ```bash
    sudo python3 phn16s_refresh_enabler.py --install
    ```
    This:
    - Generates the multi-block DisplayID 2.0 EDID firmware (`/lib/firmware/edid/edid-phn16s.bin`).
-   - Configures `drm.edid_firmware=eDP-1:edid/edid-phn16s.bin,eDP-2:edid/edid-phn16s.bin` in GRUB via `grubby`.
+   - Removes unconditional `drm.edid_firmware` boot arguments.
+   - Installs an early-boot dracut hook that enables the override only when Intel is the PCI boot display.
    - Enables `nvidia-drm.modeset=1` and `nvidia_drm.fbdev=1` for early modesetting on the dGPU.
    - Rebuilds your initramfs via `dracut`.
 
 3. **Reboot your system.**
-   After rebooting, all refresh rates (60 Hz, 75 Hz, 100 Hz, 120 Hz, 144 Hz, 165.02 Hz, 240 Hz) will be listed in KDE System Settings (or GNOME Display settings) whether you boot on Intel or switch to **NVIDIA GPU Only** in BIOS.
+   In Hybrid mode, the extra rates should appear in display settings. In NVIDIA-only mode, the panel uses its stock 240 Hz timing. Automatic Intel selection still needs verification after the first Hybrid boot.
 
 4. **To revert / uninstall:**
    ```bash
    sudo python3 phn16s_refresh_enabler.py --uninstall
    ```
+
+### Intel-only Linux override
+
+The Linux installer now selects the override during early boot only when Intel
+is the PCI boot display. It applies to Intel eDP-1 in Hybrid; NVIDIA-only uses
+its original EDID and native 240 Hz mode. NVIDIA connector numbers change across
+MUX modes, so unconditional eDP-1/eDP-2 kernel arguments are removed. Unknown
+boot-display ownership falls back to stock EDID. The dracut module is retained
+for future kernel builds. Add `rd.preysense.edid=0` for a one-boot bypass.

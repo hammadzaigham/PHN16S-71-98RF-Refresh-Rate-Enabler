@@ -3,3 +3,6 @@ obj/
 .vs/
 *.user
 *.exe
+
+__pycache__/
+*.pyc
