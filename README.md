@@ -105,7 +105,7 @@ Python script alone is not sufficient. This installer requires Fedora-style
    - Generates the multi-block DisplayID 2.0 EDID firmware (`/lib/firmware/edid/edid-phn16s.bin`).
    - Removes unconditional `drm.edid_firmware` boot arguments.
    - Installs an early-boot dracut hook that enables the override only when Intel is the PCI boot display.
-   - Enables `nvidia-drm.modeset=1` and `nvidia_drm.fbdev=1` for early modesetting on the dGPU.
+   - Leaves NVIDIA driver settings unchanged; they are separate from the Intel refresh-rate patch.
    - Rebuilds your initramfs via `dracut`.
 
 3. **Reboot your system.**

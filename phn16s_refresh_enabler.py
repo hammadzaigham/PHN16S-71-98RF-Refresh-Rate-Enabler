@@ -23,7 +23,6 @@ FIRMWARE_FILE = "edid-phn16s.bin"
 FIRMWARE_PATH = os.path.join(FIRMWARE_DIR, FIRMWARE_FILE)
 # Intel owns eDP-1 in Hybrid; NVIDIA may reuse that name in discrete mode.
 DEFAULT_CONNECTORS = ["eDP-1"]
-NVIDIA_KPARAMS = ["nvidia-drm.modeset=1", "nvidia_drm.fbdev=1"]
 
 
 def block_checksum(data, offset):
@@ -285,7 +284,6 @@ def install_override(edid_bytes, connectors=DEFAULT_CONNECTORS):
             with open(filename) as f: text = f.read()
             text = re.sub(r" ?drm\.edid_firmware=[^\s\"']+", "", text)
             with open(filename, "w") as f: f.write(text)
-    subprocess.run(["grubby", "--update-kernel=ALL", "--args=" + " ".join(NVIDIA_KPARAMS)], check=True)
     print("EDID patch restricted to Intel boot display; NVIDIA uses its stock EDID.")
 
     # Rebuild initramfs for current kernel using dracut
@@ -294,7 +292,6 @@ def install_override(edid_bytes, connectors=DEFAULT_CONNECTORS):
     subprocess.run(["dracut", "-f", "--kver", kver], check=True)
     print("Initramfs updated successfully.")
     print("\n[SUCCESS] Extra refresh rates installed for Intel eDP-1 in Hybrid mode.")
-    print("NVIDIA discrete MUX modesetting flags (modeset=1, fbdev=1) are also active.")
     print("Reboot to activate extra refresh rates in Hybrid; NVIDIA-only keeps native timings.")
 
 
@@ -305,8 +302,6 @@ def uninstall_override(connectors=DEFAULT_CONNECTORS):
 
     print("Removing kernel arguments...")
     subprocess.run(["grubby", "--update-kernel=ALL", "--remove-args=drm.edid_firmware"], check=False)
-    for param in NVIDIA_KPARAMS:
-        subprocess.run(["grubby", "--update-kernel=ALL", f"--remove-args={param}"], check=False)
 
     dracut_conf_path = "/etc/dracut.conf.d/99-edid-phn16s.conf"
     if os.path.exists(dracut_conf_path):
