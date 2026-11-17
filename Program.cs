@@ -184,7 +184,7 @@ public static class Program
         if (nvidia)
         {
             ProbeLog.Line("NVIDIA is driving the panel. Staging 60, 75, 100, 120, 144, and 165 Hz through the NVIDIA control panel API. The EDID stays original.");
-            int applied = NvidiaPanelTiming.Apply(rates, descriptors);
+            int applied = NvidiaPanelTiming.Apply(rates, descriptors, monitor.DeviceName);
             if (applied != 0)
                 return applied;
             ProbeLog.Line("The 240 Hz timing is still the preferred mode.");
@@ -192,8 +192,8 @@ public static class Program
         }
 
         ProbeLog.Line("Intel is driving the panel. Staging the EDID override after the original 240 Hz block. NVIDIA is left unchanged.");
-        IReadOnlyList<string> paths = PanelPaths(monitor);
-        if (!force && paths.Where(path => AdapterLabel(path) != "NVIDIA").Any(path => OverrideExists(path)))
+        IReadOnlyList<string> paths = IntelPaths(monitor);
+        if (!force && paths.Any(OverrideExists))
         {
             ProbeLog.Line("EDID_OVERRIDE already exists. Nothing was written. Re-run with --force to replace it, or remove it first.");
             return 1;
@@ -202,9 +202,6 @@ public static class Program
         bool wroteIntel = false;
         foreach (string path in paths)
         {
-            if (string.Equals(AdapterLabel(path), "NVIDIA", StringComparison.Ordinal))
-                continue;
-
             byte[] instanceEdid = ReadEdidAt(path);
             if (instanceEdid.Length < 256)
             {
@@ -251,10 +248,8 @@ public static class Program
 
         ProbeLog.Line("Remove override only removes the Intel EDID override.");
         bool removed = false;
-        foreach (string path in PanelPaths(monitor))
+        foreach (string path in IntelPaths(monitor))
         {
-            if (string.Equals(AdapterLabel(path), "NVIDIA", StringComparison.Ordinal))
-                continue;
             if (!OverrideExists(path))
                 continue;
             DeleteOverride(path);
@@ -278,19 +273,62 @@ public static class Program
     internal static string ActiveGpu(MonitorInfo monitor)
         => IsNvidiaActive(monitor) ? "NVIDIA" : "Intel";
 
-    private static bool IsNvidiaActive(MonitorInfo monitor)
+    /// <summary>Windows' active primary-display adapter, matching PreySense's DisplayManager.GetPrimaryDisplayGpuName().</summary>
+    internal static string? GetPrimaryDisplayGpuName()
+        => GetPrimaryDisplayAdapter().Name;
+
+    private static (string? Name, string? DeviceId) GetPrimaryDisplayAdapter()
     {
-        CcdSignal? signal = CcdSignal.ReadActive();
-        if (signal != null)
+        for (uint index = 0; ; index++)
         {
-            string marker = "UID" + signal.TargetId;
-            foreach (string path in PanelPaths(monitor))
+            var device = new Native.DisplayDevice { cb = Marshal.SizeOf<Native.DisplayDevice>() };
+            if (!Native.EnumDisplayDevices(null, index, ref device, 0))
+                return (null, null);
+            // DISPLAY_DEVICE_ATTACHED_TO_DESKTOP | DISPLAY_DEVICE_PRIMARY_DEVICE
+            if ((device.StateFlags & 5) == 5)
             {
-                if (path.Contains(marker, StringComparison.OrdinalIgnoreCase))
-                    return string.Equals(AdapterLabel(path), "NVIDIA", StringComparison.Ordinal);
+                string? name = string.IsNullOrWhiteSpace(device.DeviceString) ? null : device.DeviceString.Trim();
+                string? id = string.IsNullOrWhiteSpace(device.DeviceID) ? null : device.DeviceID.Trim();
+                return (name, id);
             }
         }
-        return monitor.Adapter.Contains("NVIDIA", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool? ClassifyGpuAdapter(string? adapterName, string? adapterId)
+    {
+        if (!string.IsNullOrWhiteSpace(adapterId))
+        {
+            if (adapterId.Contains("VEN_10DE", StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (adapterId.Contains("VEN_8086", StringComparison.OrdinalIgnoreCase))
+                return false;
+        }
+        if (!string.IsNullOrWhiteSpace(adapterName))
+        {
+            if (adapterName.Contains("NVIDIA", StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (adapterName.Contains("Intel", StringComparison.OrdinalIgnoreCase))
+                return false;
+        }
+        return null;
+    }
+
+    private static bool IsNvidiaActive(MonitorInfo monitor)
+    {
+        var (primaryName, primaryId) = GetPrimaryDisplayAdapter();
+        string? activeName = monitor.IsPrimary ? (primaryName ?? monitor.Adapter) : monitor.Adapter;
+        string? activeId = monitor.IsPrimary ? (primaryId ?? monitor.AdapterId) : monitor.AdapterId;
+
+        if (ClassifyGpuAdapter(activeName, activeId) is bool byAdapter)
+            return byAdapter;
+
+        if (NvidiaPanelTiming.TryGetDdsActiveMux(out bool ddsNvidia))
+            return ddsNvidia;
+
+        if (DriverRestart.IsDiscreteGpuOnlyDisplay())
+            return true;
+
+        return string.Equals(AdapterLabel(monitor.RegistryPath), "NVIDIA", StringComparison.Ordinal);
     }
 
     internal static int Restart(MonitorInfo monitor)
@@ -310,12 +348,15 @@ public static class Program
     }
 
     internal static bool OverrideExists(MonitorInfo monitor)
-        => PanelPaths(monitor).Any(OverrideExists);
+        => IntelPaths(monitor).Any(OverrideExists);
+
+    internal static bool IntelOverrideExists(MonitorInfo monitor)
+        => IntelPaths(monitor).Any(OverrideExists);
 
     internal static Dictionary<string, Dictionary<string, byte[]>> ReadOverrides(MonitorInfo monitor)
     {
         var saved = new Dictionary<string, Dictionary<string, byte[]>>(StringComparer.OrdinalIgnoreCase);
-        foreach (string path in PanelPaths(monitor))
+        foreach (string path in IntelPaths(monitor))
         {
             Dictionary<string, byte[]>? values = ReadOverride(path);
             if (values != null)
@@ -327,12 +368,15 @@ public static class Program
     internal static void RestoreOverrides(Dictionary<string, Dictionary<string, byte[]>> saved)
     {
         foreach (var entry in saved)
-            WriteOverride(entry.Key, entry.Value);
+        {
+            if (string.Equals(AdapterLabel(entry.Key), "Intel", StringComparison.Ordinal))
+                WriteOverride(entry.Key, entry.Value);
+        }
     }
 
     internal static void DeleteOverrides(MonitorInfo monitor)
     {
-        foreach (string path in PanelPaths(monitor))
+        foreach (string path in IntelPaths(monitor))
             DeleteOverride(path);
     }
 
@@ -387,6 +431,9 @@ public static class Program
     private static IReadOnlyList<string> PanelPaths(MonitorInfo monitor)
         => monitor.RegistryPaths.Count > 0 ? monitor.RegistryPaths : new[] { monitor.RegistryPath };
 
+    private static IReadOnlyList<string> IntelPaths(MonitorInfo monitor)
+        => PanelPaths(monitor).Where(path => string.Equals(AdapterLabel(path), "Intel", StringComparison.Ordinal)).ToList();
+
     private static byte[] ReadEdidAt(string path)
     {
         using RegistryKey key = OpenParameters(path, writable: false);
@@ -397,10 +444,90 @@ public static class Program
 
     internal static string AdapterLabel(string parameterPath)
     {
-        string[] parts = parameterPath.Split('\\');
-        string instance = parts.Length >= 2 ? parts[^2] : parameterPath;
+        (string? pnpDeviceId, string instance) = ExtractPnpDeviceId(parameterPath);
+        if (pnpDeviceId != null && TryGetParentDeviceId(pnpDeviceId) is string parentId)
+        {
+            if (parentId.Contains("VEN_10DE", StringComparison.OrdinalIgnoreCase))
+                return "NVIDIA";
+            if (parentId.Contains("VEN_8086", StringComparison.OrdinalIgnoreCase))
+                return "Intel";
+        }
+
+        if (ClassifyInstanceViaPciRegistry(instance) is string pciVendor)
+            return pciVendor;
+
         using RegistryKey? nvidia = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\DISPLAY\NVD0000\" + instance);
-        return nvidia != null ? "NVIDIA" : "Intel";
+        return nvidia != null ? "NVIDIA" : "Unknown";
+    }
+
+    private static (string? DeviceId, string Instance) ExtractPnpDeviceId(string parameterPath)
+    {
+        string path = parameterPath;
+        const string regPrefix = @"\Registry\Machine\";
+        if (path.StartsWith(regPrefix, StringComparison.OrdinalIgnoreCase))
+            path = path[regPrefix.Length..];
+        const string enumPrefix = @"SYSTEM\CurrentControlSet\Enum\";
+        if (path.StartsWith(enumPrefix, StringComparison.OrdinalIgnoreCase))
+            path = path[enumPrefix.Length..];
+        const string paramSuffix = @"\Device Parameters";
+        if (path.EndsWith(paramSuffix, StringComparison.OrdinalIgnoreCase))
+            path = path[..^paramSuffix.Length];
+
+        string[] parts = path.Split('\\', StringSplitOptions.RemoveEmptyEntries);
+        string instance = parts.Length >= 1 ? parts[^1] : parameterPath;
+        string? deviceId = parts.Length >= 3 ? string.Join('\\', parts.Take(3)) : null;
+        return (deviceId, instance);
+    }
+
+    private static string? TryGetParentDeviceId(string deviceInstanceId)
+    {
+        if (Native.CM_Locate_DevNodeW(out uint devInst, deviceInstanceId, 0) != 0
+            && Native.CM_Locate_DevNodeW(out devInst, deviceInstanceId, Native.CmLocateDevnodePhantom) != 0)
+        {
+            return null;
+        }
+        if (Native.CM_Get_Parent(out uint parentInst, devInst, 0) != 0)
+            return null;
+        char[] buffer = new char[512];
+        if (Native.CM_Get_Device_IDW(parentInst, buffer, (uint)buffer.Length, 0) != 0)
+            return null;
+        int end = Array.IndexOf(buffer, '\0');
+        return end >= 0 ? new string(buffer, 0, end) : new string(buffer);
+    }
+
+    private static string? ClassifyInstanceViaPciRegistry(string instance)
+    {
+        if (string.IsNullOrWhiteSpace(instance))
+            return null;
+
+        using RegistryKey? pciKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\PCI");
+        if (pciKey == null)
+            return null;
+
+        foreach (string deviceKeyName in pciKey.GetSubKeyNames())
+        {
+            bool isNvidia = deviceKeyName.Contains("VEN_10DE", StringComparison.OrdinalIgnoreCase);
+            bool isIntel = deviceKeyName.Contains("VEN_8086", StringComparison.OrdinalIgnoreCase);
+            if (!isNvidia && !isIntel)
+                continue;
+
+            using RegistryKey? deviceKey = pciKey.OpenSubKey(deviceKeyName);
+            if (deviceKey == null)
+                continue;
+
+            foreach (string pciInstanceName in deviceKey.GetSubKeyNames())
+            {
+                using RegistryKey? instKey = deviceKey.OpenSubKey(pciInstanceName);
+                if (instKey?.GetValue("ParentIdPrefix") is not string prefix || string.IsNullOrWhiteSpace(prefix))
+                    continue;
+                if (instance.Equals(prefix, StringComparison.OrdinalIgnoreCase)
+                    || instance.StartsWith(prefix + "&", StringComparison.OrdinalIgnoreCase))
+                {
+                    return isNvidia ? "NVIDIA" : "Intel";
+                }
+            }
+        }
+        return null;
     }
 
     private static RegistryKey OpenParameters(string path, bool writable)
@@ -497,6 +624,8 @@ internal sealed class MonitorInfo
     public string DeviceName { get; init; } = "";
     public string DeviceString { get; init; } = "";
     public string Adapter { get; init; } = "";
+    public string AdapterId { get; init; } = "";
+    public bool IsPrimary { get; init; } = true;
     public string DeviceId { get; init; } = "";
     public string RegistryPath { get; init; } = "";
     public List<string> RegistryPaths { get; init; } = new();
@@ -526,62 +655,125 @@ internal sealed class MonitorInfo
 
 internal static class MonitorLocator
 {
+    private const uint EddGetDeviceInterfaceName = 0x1;
+
+    private sealed record Candidate(
+        Native.DisplayDevice Adapter,
+        Native.DisplayDevice Monitor,
+        string InterfaceId,
+        List<string> RegistryPaths,
+        int Priority);
+
     public static MonitorInfo? FindInternal()
     {
-        var device = new Native.DisplayDevice { cb = System.Runtime.InteropServices.Marshal.SizeOf<Native.DisplayDevice>() };
-        uint index = 0;
-        while (Native.EnumDisplayDevices(null, index, ref device, 0))
+        CcdSignal? signal = CcdSignal.ReadActive();
+        string? ccdActiveInstance = ExtractInstanceFromInterfacePath(signal?.TargetDevicePath);
+        Candidate? best = null;
+
+        var device = new Native.DisplayDevice { cb = Marshal.SizeOf<Native.DisplayDevice>() };
+        for (uint index = 0; Native.EnumDisplayDevices(null, index, ref device, 0); index++)
         {
             bool attached = (device.StateFlags & 0x1) != 0;
             bool primary = (device.StateFlags & 0x4) != 0;
-            if (attached && primary)
+            if (attached)
             {
-                var monitor = new Native.DisplayDevice { cb = System.Runtime.InteropServices.Marshal.SizeOf<Native.DisplayDevice>() };
-                if (Native.EnumDisplayDevices(device.DeviceName, 0, ref monitor, 0))
+                for (uint monIndex = 0; ; monIndex++)
                 {
-                    List<string> registryPaths = FindEdidParameters(monitor.DeviceID);
-                    if (registryPaths.Count == 0)
-                        return null;
-                    string registryPath = registryPaths[0];
-                    var mode = new Native.DevMode { dmSize = (short)System.Runtime.InteropServices.Marshal.SizeOf<Native.DevMode>() };
-                    Native.EnumDisplaySettings(device.DeviceName, Native.EnumCurrentSettings, ref mode);
-                    var rates = new SortedSet<int>();
-                    var listed = new Native.DevMode { dmSize = (short)System.Runtime.InteropServices.Marshal.SizeOf<Native.DevMode>() };
-                    for (int i = 0; Native.EnumDisplaySettings(device.DeviceName, i, ref listed); i++)
-                    {
-                        if (listed.dmPelsWidth == mode.dmPelsWidth && listed.dmPelsHeight == mode.dmPelsHeight && listed.dmDisplayFrequency > 0)
-                            rates.Add(listed.dmDisplayFrequency);
-                    }
+                    var monitor = new Native.DisplayDevice { cb = Marshal.SizeOf<Native.DisplayDevice>() };
+                    if (!Native.EnumDisplayDevices(device.DeviceName, monIndex, ref monitor, 0))
+                        break;
+                    if ((monitor.StateFlags & 0x1) == 0)
+                        continue;
 
-                    return new MonitorInfo
+                    var monitorIface = new Native.DisplayDevice { cb = Marshal.SizeOf<Native.DisplayDevice>() };
+                    string ifaceId = Native.EnumDisplayDevices(device.DeviceName, monIndex, ref monitorIface, EddGetDeviceInterfaceName)
+                        ? monitorIface.DeviceID
+                        : "";
+
+                    string? activeInstance = ExtractInstanceFromInterfacePath(ifaceId) ?? ccdActiveInstance;
+                    List<string> registryPaths = FindEdidParameters(monitor.DeviceID, ifaceId, activeInstance);
+                    if (registryPaths.Count == 0)
+                        continue;
+
+                    int priority = 0;
+                    if (signal != null && signal.IsInternal)
                     {
-                        DeviceName = device.DeviceName,
-                        Adapter = device.DeviceString,
-                        DeviceString = string.IsNullOrWhiteSpace(monitor.DeviceString) ? device.DeviceString : monitor.DeviceString,
-                        DeviceId = monitor.DeviceID,
-                        RegistryPath = registryPath,
-                        RegistryPaths = registryPaths,
-                        CurrentWidth = mode.dmPelsWidth,
-                        CurrentHeight = mode.dmPelsHeight,
-                        CurrentHz = mode.dmDisplayFrequency,
-                        Modes = rates.ToList()
-                    };
+                        if (!string.IsNullOrEmpty(signal.TargetDevicePath)
+                            && string.Equals(ifaceId, signal.TargetDevicePath, StringComparison.OrdinalIgnoreCase))
+                        {
+                            priority = 3;
+                        }
+                        else if (!string.IsNullOrEmpty(signal.SourceGdiName)
+                            && string.Equals(device.DeviceName, signal.SourceGdiName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            priority = 2;
+                        }
+                    }
+                    if (priority == 0 && primary)
+                        priority = 1;
+
+                    if (best == null || priority > best.Priority)
+                        best = new Candidate(device, monitor, ifaceId, registryPaths, priority);
                 }
             }
-            index++;
-            device = new Native.DisplayDevice { cb = System.Runtime.InteropServices.Marshal.SizeOf<Native.DisplayDevice>() };
+            device = new Native.DisplayDevice { cb = Marshal.SizeOf<Native.DisplayDevice>() };
         }
-        return null;
+
+        if (best == null)
+            return null;
+
+        var mode = new Native.DevMode { dmSize = (short)Marshal.SizeOf<Native.DevMode>() };
+        Native.EnumDisplaySettings(best.Adapter.DeviceName, Native.EnumCurrentSettings, ref mode);
+        var rates = new SortedSet<int>();
+        var listed = new Native.DevMode { dmSize = (short)Marshal.SizeOf<Native.DevMode>() };
+        for (int i = 0; Native.EnumDisplaySettings(best.Adapter.DeviceName, i, ref listed); i++)
+        {
+            if (listed.dmPelsWidth == mode.dmPelsWidth && listed.dmPelsHeight == mode.dmPelsHeight && listed.dmDisplayFrequency > 0)
+                rates.Add(listed.dmDisplayFrequency);
+        }
+
+        return new MonitorInfo
+        {
+            DeviceName = best.Adapter.DeviceName,
+            Adapter = best.Adapter.DeviceString.Trim(),
+            AdapterId = best.Adapter.DeviceID.Trim(),
+            IsPrimary = (best.Adapter.StateFlags & 0x4) != 0,
+            DeviceString = string.IsNullOrWhiteSpace(best.Monitor.DeviceString) ? best.Adapter.DeviceString.Trim() : best.Monitor.DeviceString.Trim(),
+            DeviceId = best.Monitor.DeviceID,
+            RegistryPath = best.RegistryPaths[0],
+            RegistryPaths = best.RegistryPaths,
+            CurrentWidth = mode.dmPelsWidth,
+            CurrentHeight = mode.dmPelsHeight,
+            CurrentHz = mode.dmDisplayFrequency,
+            Modes = rates.ToList()
+        };
     }
 
-    private static List<string> FindEdidParameters(string deviceId)
+    private static string? ExtractInstanceFromInterfacePath(string? interfacePath)
+    {
+        if (string.IsNullOrWhiteSpace(interfacePath))
+            return null;
+        string[] parts = interfacePath.Split('#', StringSplitOptions.RemoveEmptyEntries);
+        return parts.Length >= 3 ? parts[2] : null;
+    }
+
+    private static List<string> FindEdidParameters(string deviceId, string? interfacePath, string? activeInstance)
     {
         var paths = new List<string>();
+        string? model = null;
         string[] parts = deviceId.Split('\\');
-        if (parts.Length < 2 || parts[1].Length == 0)
+        if (parts.Length >= 2 && parts[1].Length > 0)
+            model = parts[1];
+        else if (!string.IsNullOrWhiteSpace(interfacePath))
+        {
+            string[] ifaceParts = interfacePath.Split('#', StringSplitOptions.RemoveEmptyEntries);
+            if (ifaceParts.Length >= 2 && ifaceParts[1].Length > 0)
+                model = ifaceParts[1];
+        }
+
+        if (string.IsNullOrEmpty(model))
             return paths;
 
-        string model = parts[1];
         using RegistryKey? modelKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\DISPLAY\" + model);
         if (modelKey == null)
             return paths;
@@ -590,7 +782,13 @@ internal static class MonitorLocator
         {
             using RegistryKey? parameters = modelKey.OpenSubKey(instance + @"\Device Parameters");
             if (parameters?.GetValue("EDID") is byte[] edid && edid.Length >= 256)
-                paths.Add(@"SYSTEM\CurrentControlSet\Enum\DISPLAY\" + model + @"\" + instance + @"\Device Parameters");
+            {
+                string fullPath = @"SYSTEM\CurrentControlSet\Enum\DISPLAY\" + model + @"\" + instance + @"\Device Parameters";
+                if (!string.IsNullOrEmpty(activeInstance) && instance.Equals(activeInstance, StringComparison.OrdinalIgnoreCase))
+                    paths.Insert(0, fullPath);
+                else
+                    paths.Add(fullPath);
+            }
         }
         return paths;
     }
@@ -606,6 +804,9 @@ internal sealed class CcdSignal
     public double RefreshHz { get; init; }
     public uint TargetId { get; init; }
     public string Output { get; init; } = "";
+    public bool IsInternal { get; init; }
+    public string SourceGdiName { get; init; } = "";
+    public string TargetDevicePath { get; init; } = "";
 
     public string Describe()
     {
@@ -616,27 +817,84 @@ internal sealed class CcdSignal
             + RefreshHz.ToString("0.000") + " Hz";
     }
 
+    public static string DescribeAllTargets()
+    {
+        if (!TryQueryActiveConfig(out _, out Native.ModeInfo[] modes, out _, out uint modeCount))
+            return "unavailable";
+
+        var parts = new List<string>();
+        for (int i = 0; i < modeCount; i++)
+        {
+            if (modes[i].infoType != Native.ModeInfoTypeTarget)
+                continue;
+            var video = modes[i].mode.targetMode.video;
+            parts.Add(video.pixelRate + " Hz, " + video.totalSize.cx + "x" + video.totalSize.cy);
+        }
+        return parts.Count == 0 ? "no target" : string.Join("; ", parts);
+    }
+
     public static CcdSignal? ReadActive()
     {
-        if (Native.GetDisplayConfigBufferSizes(Native.QdcOnlyActivePaths, out uint pathCount, out uint modeCount) != 0)
+        if (!TryQueryActiveConfig(out Native.PathInfo[] paths, out Native.ModeInfo[] modes, out uint pathCount, out uint modeCount)
+            || pathCount < 1)
+        {
             return null;
-        var paths = new Native.PathInfo[pathCount];
-        var modes = new Native.ModeInfo[modeCount];
-        if (Native.QueryDisplayConfig(Native.QdcOnlyActivePaths, ref pathCount, paths, ref modeCount, modes, IntPtr.Zero) != 0)
-            return null;
-        if (pathCount < 1)
+        }
+
+        int selectedIndex = -1;
+        for (int i = 0; i < pathCount; i++)
+        {
+            uint modeIdx = paths[i].Target.modeInfoIdx;
+            if (modeIdx >= modeCount || modes[modeIdx].infoType != Native.ModeInfoTypeTarget)
+                continue;
+            if (selectedIndex < 0)
+                selectedIndex = i;
+            if (IsInternalTechnology(paths[i].Target.outputTechnology))
+            {
+                selectedIndex = i;
+                break;
+            }
+        }
+
+        if (selectedIndex < 0)
             return null;
 
-        var path = paths[0];
-        uint modeIndex = path.Target.modeInfoIdx;
-        if (modeIndex >= modeCount || modes[modeIndex].infoType != Native.ModeInfoTypeTarget)
-            return null;
-
-        var video = modes[modeIndex].mode.targetMode.video;
+        var path = paths[selectedIndex];
+        var video = modes[path.Target.modeInfoIdx].mode.targetMode.video;
         double refresh = video.vSyncFreq.Denominator == 0
             ? 0
             : video.vSyncFreq.Numerator / (double)video.vSyncFreq.Denominator;
-        string output = path.Target.outputTechnology == 0x80000000 ? "internal panel" : "technology " + path.Target.outputTechnology;
+        bool isInternal = IsInternalTechnology(path.Target.outputTechnology);
+        string output = isInternal ? "internal panel" : "technology " + path.Target.outputTechnology;
+
+        string sourceGdi = "";
+        var srcName = new Native.SourceDeviceName
+        {
+            header = new Native.DeviceInfoHeader
+            {
+                type = Native.DeviceInfoGetSourceName,
+                size = Marshal.SizeOf<Native.SourceDeviceName>(),
+                adapterId = path.Source.adapterId,
+                id = path.Source.id
+            }
+        };
+        if (Native.DisplayConfigGetDeviceInfo(ref srcName) == 0 && srcName.viewGdiDeviceName != null)
+            sourceGdi = srcName.viewGdiDeviceName.TrimEnd('\0');
+
+        string targetPath = "";
+        var targetName = new Native.TargetDeviceName
+        {
+            header = new Native.DeviceInfoHeader
+            {
+                type = Native.DeviceInfoGetTargetName,
+                size = Marshal.SizeOf<Native.TargetDeviceName>(),
+                adapterId = path.Target.adapterId,
+                id = path.Target.id
+            }
+        };
+        if (Native.DisplayConfigGetDeviceInfo(ref targetName) == 0 && targetName.monitorDevicePath != null)
+            targetPath = targetName.monitorDevicePath.TrimEnd('\0');
+
         return new CcdSignal
         {
             PixelClockHz = video.pixelRate,
@@ -646,8 +904,36 @@ internal sealed class CcdSignal
             VTotal = video.totalSize.cy,
             RefreshHz = refresh,
             TargetId = path.Target.id,
-            Output = output
+            Output = output,
+            IsInternal = isInternal,
+            SourceGdiName = sourceGdi,
+            TargetDevicePath = targetPath
         };
+    }
+
+    private static bool IsInternalTechnology(uint tech)
+        => tech is 0x80000000u or 10u or 6u;
+
+    private static bool TryQueryActiveConfig(out Native.PathInfo[] paths, out Native.ModeInfo[] modes, out uint pathCount, out uint modeCount)
+    {
+        paths = Array.Empty<Native.PathInfo>();
+        modes = Array.Empty<Native.ModeInfo>();
+        pathCount = 0;
+        modeCount = 0;
+
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            if (Native.GetDisplayConfigBufferSizes(Native.QdcOnlyActivePaths, out pathCount, out modeCount) != 0)
+                return false;
+            paths = new Native.PathInfo[pathCount];
+            modes = new Native.ModeInfo[modeCount];
+            int rc = Native.QueryDisplayConfig(Native.QdcOnlyActivePaths, ref pathCount, paths, ref modeCount, modes, IntPtr.Zero);
+            if (rc == 0)
+                return true;
+            if (rc != 122) // ERROR_INSUFFICIENT_BUFFER
+                return false;
+        }
+        return false;
     }
 }
 
@@ -1185,26 +1471,29 @@ internal static class Native
     public const int EnumCurrentSettings = -1;
     public const uint QdcOnlyActivePaths = 2;
     public const int ModeInfoTypeTarget = 2;
+    public const int DeviceInfoGetSourceName = 1;
+    public const int DeviceInfoGetTargetName = 2;
+    public const uint CmLocateDevnodePhantom = 1;
 
-    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     public struct DisplayDevice
     {
         public int cb;
-        [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.ByValTStr, SizeConst = 32)]
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
         public string DeviceName;
-        [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.ByValTStr, SizeConst = 128)]
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
         public string DeviceString;
         public int StateFlags;
-        [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.ByValTStr, SizeConst = 128)]
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
         public string DeviceID;
-        [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.ByValTStr, SizeConst = 128)]
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
         public string DeviceKey;
     }
 
-    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     public struct DevMode
     {
-        [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.ByValTStr, SizeConst = 32)]
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
         public string dmDeviceName;
         public short dmSpecVersion;
         public short dmDriverVersion;
@@ -1220,7 +1509,7 @@ internal static class Native
         public short dmYResolution;
         public short dmTTOption;
         public short dmCollate;
-        [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.ByValTStr, SizeConst = 32)]
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
         public string dmFormName;
         public short dmLogPixels;
         public int dmBitsPerPel;
@@ -1238,27 +1527,48 @@ internal static class Native
         public int dmPanningHeight;
     }
 
-    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern bool EnumDisplayDevices(string? lpDevice, uint iDevNum, ref DisplayDevice lpDisplayDevice, uint dwFlags);
 
-    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern bool EnumDisplaySettings(string? deviceName, int modeNum, ref DevMode devMode);
 
-    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    [DllImport("user32.dll", EntryPoint = "ChangeDisplaySettingsExW", CharSet = CharSet.Unicode)]
+    public static extern int ChangeDisplaySettingsEx(string? deviceName, ref DevMode devMode, nint hwnd, int flags, nint param);
+
+    [DllImport("kernel32.dll", EntryPoint = "LoadLibraryW", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern nint LoadLibrary(string path);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool FreeLibrary(nint module);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
+    public static extern nint GetProcAddress(nint module, string name);
+
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+    public static extern uint CM_Locate_DevNodeW(out uint pdnDevInst, string pDeviceID, uint ulFlags);
+
+    [DllImport("cfgmgr32.dll")]
+    public static extern uint CM_Get_Parent(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
+
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+    public static extern uint CM_Get_Device_IDW(uint dnDevInst, [Out] char[] buffer, uint bufferLen, uint ulFlags);
+
+    [StructLayout(LayoutKind.Sequential)]
     public struct Luid
     {
         public uint LowPart;
         public int HighPart;
     }
 
-    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    [StructLayout(LayoutKind.Sequential)]
     public struct Rational
     {
         public uint Numerator;
         public uint Denominator;
     }
 
-    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    [StructLayout(LayoutKind.Sequential)]
     public struct PathSource
     {
         public Luid adapterId;
@@ -1267,7 +1577,7 @@ internal static class Native
         public uint statusFlags;
     }
 
-    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    [StructLayout(LayoutKind.Sequential)]
     public struct PathTarget
     {
         public Luid adapterId;
@@ -1282,7 +1592,7 @@ internal static class Native
         public uint statusFlags;
     }
 
-    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    [StructLayout(LayoutKind.Sequential)]
     public struct PathInfo
     {
         public PathSource Source;
@@ -1290,14 +1600,14 @@ internal static class Native
         public uint flags;
     }
 
-    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    [StructLayout(LayoutKind.Sequential)]
     public struct Region
     {
         public uint cx;
         public uint cy;
     }
 
-    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    [StructLayout(LayoutKind.Sequential)]
     public struct VideoSignal
     {
         public ulong pixelRate;
@@ -1309,13 +1619,13 @@ internal static class Native
         public uint scanLineOrdering;
     }
 
-    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    [StructLayout(LayoutKind.Sequential)]
     public struct TargetMode
     {
         public VideoSignal video;
     }
 
-    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    [StructLayout(LayoutKind.Sequential)]
     public struct SourceMode
     {
         public uint width;
@@ -1325,16 +1635,16 @@ internal static class Native
         public int y;
     }
 
-    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Explicit)]
+    [StructLayout(LayoutKind.Explicit)]
     public struct ModeUnion
     {
-        [System.Runtime.InteropServices.FieldOffset(0)]
+        [FieldOffset(0)]
         public TargetMode targetMode;
-        [System.Runtime.InteropServices.FieldOffset(0)]
+        [FieldOffset(0)]
         public SourceMode sourceMode;
     }
 
-    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    [StructLayout(LayoutKind.Sequential)]
     public struct ModeInfo
     {
         public int infoType;
@@ -1343,15 +1653,53 @@ internal static class Native
         public ModeUnion mode;
     }
 
-    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    [StructLayout(LayoutKind.Sequential)]
+    public struct DeviceInfoHeader
+    {
+        public int type;
+        public int size;
+        public Luid adapterId;
+        public uint id;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct SourceDeviceName
+    {
+        public DeviceInfoHeader header;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+        public string viewGdiDeviceName;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct TargetDeviceName
+    {
+        public DeviceInfoHeader header;
+        public uint flags;
+        public uint outputTechnology;
+        public ushort edidManufactureId;
+        public ushort edidProductCodeId;
+        public uint connectorInstance;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)]
+        public string monitorFriendlyDeviceName;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+        public string monitorDevicePath;
+    }
+
+    [DllImport("user32.dll")]
     public static extern int GetDisplayConfigBufferSizes(uint flags, out uint numPathArrayElements, out uint numModeInfoArrayElements);
 
-    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    [DllImport("user32.dll")]
     public static extern int QueryDisplayConfig(
         uint flags,
         ref uint numPathArrayElements,
-        [System.Runtime.InteropServices.Out] PathInfo[] pathArray,
+        [Out] PathInfo[] pathArray,
         ref uint numModeInfoArrayElements,
-        [System.Runtime.InteropServices.Out] ModeInfo[] modeInfoArray,
+        [Out] ModeInfo[] modeInfoArray,
         IntPtr currentTopologyId);
+
+    [DllImport("user32.dll")]
+    public static extern int DisplayConfigGetDeviceInfo(ref SourceDeviceName requestPacket);
+
+    [DllImport("user32.dll")]
+    public static extern int DisplayConfigGetDeviceInfo(ref TargetDeviceName requestPacket);
 }

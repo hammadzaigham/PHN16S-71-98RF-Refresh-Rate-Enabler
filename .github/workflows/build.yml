@@ -35,18 +35,26 @@ jobs:
           name: PHN16S-71-98RF Refresh Rate Enabler
           path: dist/PHN16S-71-98RF Refresh Rate Enabler.exe
 
-      - name: Publish v1.0.0
+      - name: Publish v1.1.0
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
           $exe = "dist/PHN16S-71-98RF Refresh Rate Enabler.exe"
+          $notes = @'
+          ## Bug Fixes
+          - **Active GPU detection**: Uses `EnumDisplayDevices` (`ATTACHED_TO_DESKTOP | PRIMARY_DEVICE`) like PreySense, with NVIDIA Advanced Optimus (`nvcpl.dll` DDS MUX status) and discrete-only fallbacks instead of relying on `DISPLAY\NVD0000` registry presence.
+          - **Intel-only EDID override**: Resolves monitor registry instances via `cfgmgr32.dll` parent lookup and PCI `ParentIdPrefix` matching so `EDID_OVERRIDE` only touches verified Intel (`VEN_8086`) panel paths and never touches NVIDIA.
+          - **NVIDIA Control Panel API**: Resolves `nvcpl.dll` from NVIDIA App / Control Panel paths before `System32`, closes `NvCplApiClose` and frees the library properly, and restores modes on the active panel device.
+          - **Driver restart & F8 recovery**: Fixes Win32 message queue creation, `GetMessage` loop handling, and thread shutdown ordering before disposing the F8 recovery wait handle.
+          - **UI fixes**: Adds hover/pressed/disabled button states, expander arrow indicators, and scrollable header sizing so expanding Troubleshooting & Advanced Info keeps the log readable.
+          '@
           $exists = $false
-          gh release view v1.0.0 *> $null
+          gh release view v1.1.0 *> $null
           if ($LASTEXITCODE -eq 0) { $exists = $true }
           if (-not $exists) {
-            gh release create v1.0.0 $exe --title "v1.0.0" --notes "First release of the PHN16S-71-98RF Refresh Rate Enabler. Requires the .NET 10 desktop runtime."
+            gh release create v1.1.0 $exe --title "PHN16S-71-98RF Refresh Rate Enabler v1.1.0" --notes $notes
           } else {
-            gh release upload v1.0.0 $exe --clobber
+            gh release upload v1.1.0 $exe --clobber
           }

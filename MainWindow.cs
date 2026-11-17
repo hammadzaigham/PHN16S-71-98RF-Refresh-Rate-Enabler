@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Data;
+using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 
@@ -26,6 +27,7 @@ public sealed class MainWindow : Window
         AcceptsReturn = true,
         TextWrapping = TextWrapping.Wrap,
         VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+        MinHeight = 140,
         FontFamily = new FontFamily("Consolas"),
         FontSize = 13,
         BorderThickness = new Thickness(0),
@@ -95,11 +97,20 @@ public sealed class MainWindow : Window
         header.Children.Add(StepBody("Open Windows Settings → System → Display → Advanced display. Choose a refresh rate, and confirm if Windows asks."));
         header.Children.Add(MoreInfo());
         header.Children.Add(_summary);
-        DockPanel.SetDock(header, Dock.Top);
+
+        var headerScroller = new ScrollViewer
+        {
+            Content = header,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            MaxHeight = Math.Max(180, Height - 280)
+        };
+        SizeChanged += (_, _) => headerScroller.MaxHeight = Math.Max(180, ActualHeight - 280);
+        DockPanel.SetDock(headerScroller, Dock.Top);
 
         root.Children.Add(buttons);
         root.Children.Add(_nextStep);
-        root.Children.Add(header);
+        root.Children.Add(headerScroller);
         root.Children.Add(_log);
         Content = root;
 
@@ -153,7 +164,7 @@ public sealed class MainWindow : Window
             _edid = _monitor.ReadEdid();
             _panel = PanelEdid.Parse(_edid);
             CcdSignal? signal = CcdSignal.ReadActive();
-            bool over = Program.OverrideExists(_monitor);
+            bool over = Program.IntelOverrideExists(_monitor);
             string gpu = Program.ActiveGpu(_monitor);
             ShowGpu(gpu);
             string modeList = _monitor.Modes.Count == 0 ? "none listed yet" : string.Join(", ", _monitor.Modes.Select(hz => hz + " Hz"));
@@ -172,14 +183,12 @@ public sealed class MainWindow : Window
 
             if (clearLog)
             {
+                ProbeLog.Line("Active GPU: " + gpu + " (" + _monitor.Adapter + ")");
+                ProbeLog.Line("Registry: " + _monitor.RegistryPath);
                 foreach (string line in _panel.Report)
                     ProbeLog.Line(line);
                 if (signal != null)
                     ProbeLog.Line(_panel.Compare(signal));
-            }
-
-            if (clearLog)
-            {
                 foreach (int hz in Program.StagedRates)
                 {
                     _panel.TryBuild(hz, out _, out string detail);
@@ -360,6 +369,7 @@ public sealed class MainWindow : Window
             Background = primary ? PrimaryFace : ButtonFace,
             BorderThickness = new Thickness(0),
             FontWeight = primary ? FontWeights.SemiBold : FontWeights.Normal,
+            Cursor = Cursors.Hand,
             Template = DarkButtonTemplate()
         };
         button.Click += click;
@@ -368,15 +378,29 @@ public sealed class MainWindow : Window
 
     private static ControlTemplate DarkExpanderTemplate()
     {
+        var arrow = new FrameworkElementFactory(typeof(TextBlock), "Arrow");
+        arrow.SetValue(TextBlock.TextProperty, "▸ ");
+        arrow.SetValue(TextBlock.ForegroundProperty, new TemplateBindingExtension(Control.ForegroundProperty));
+        arrow.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+
         var headerText = new FrameworkElementFactory(typeof(ContentPresenter));
         headerText.SetValue(ContentPresenter.ContentProperty, new TemplateBindingExtension(ContentControl.ContentProperty));
         headerText.SetValue(ContentPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Left);
         headerText.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
+
+        var headerRow = new FrameworkElementFactory(typeof(StackPanel));
+        headerRow.SetValue(StackPanel.OrientationProperty, Orientation.Horizontal);
+        headerRow.AppendChild(arrow);
+        headerRow.AppendChild(headerText);
+
         var headerChrome = new FrameworkElementFactory(typeof(Border));
         headerChrome.SetValue(Border.BackgroundProperty, Brushes.Transparent);
         headerChrome.SetValue(Border.PaddingProperty, new Thickness(0, 4, 0, 4));
-        headerChrome.AppendChild(headerText);
+        headerChrome.AppendChild(headerRow);
         var headerTemplate = new ControlTemplate(typeof(ToggleButton)) { VisualTree = headerChrome };
+        var checkedTrigger = new Trigger { Property = ToggleButton.IsCheckedProperty, Value = true };
+        checkedTrigger.Setters.Add(new Setter(TextBlock.TextProperty, "▾ ", "Arrow"));
+        headerTemplate.Triggers.Add(checkedTrigger);
 
         var header = new FrameworkElementFactory(typeof(ToggleButton), "HeaderSite");
         header.SetValue(ContentControl.ContentProperty, new TemplateBindingExtension(HeaderedContentControl.HeaderProperty));
@@ -386,6 +410,7 @@ public sealed class MainWindow : Window
         header.SetValue(Control.BorderThicknessProperty, new Thickness(0));
         header.SetValue(Control.HorizontalContentAlignmentProperty, HorizontalAlignment.Left);
         header.SetValue(Control.PaddingProperty, new Thickness(0));
+        header.SetValue(FrameworkElement.CursorProperty, Cursors.Hand);
         header.SetValue(Control.TemplateProperty, headerTemplate);
         header.SetBinding(ToggleButton.IsCheckedProperty, new Binding(nameof(Expander.IsExpanded))
         {
@@ -412,7 +437,7 @@ public sealed class MainWindow : Window
 
     private static ControlTemplate DarkButtonTemplate()
     {
-        var border = new FrameworkElementFactory(typeof(Border));
+        var border = new FrameworkElementFactory(typeof(Border), "Chrome");
         border.SetValue(Border.BackgroundProperty, new TemplateBindingExtension(Button.BackgroundProperty));
         border.SetValue(Border.PaddingProperty, new TemplateBindingExtension(Button.PaddingProperty));
         border.SetValue(Border.CornerRadiusProperty, new CornerRadius(4));
@@ -421,7 +446,22 @@ public sealed class MainWindow : Window
         presenter.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
         presenter.SetValue(TextBlock.ForegroundProperty, new TemplateBindingExtension(Button.ForegroundProperty));
         border.AppendChild(presenter);
-        return new ControlTemplate(typeof(Button)) { VisualTree = border };
+
+        var template = new ControlTemplate(typeof(Button)) { VisualTree = border };
+
+        var hover = new Trigger { Property = UIElement.IsMouseOverProperty, Value = true };
+        hover.Setters.Add(new Setter(UIElement.OpacityProperty, 0.85, "Chrome"));
+        template.Triggers.Add(hover);
+
+        var pressed = new Trigger { Property = ButtonBase.IsPressedProperty, Value = true };
+        pressed.Setters.Add(new Setter(UIElement.OpacityProperty, 0.70, "Chrome"));
+        template.Triggers.Add(pressed);
+
+        var disabled = new Trigger { Property = UIElement.IsEnabledProperty, Value = false };
+        disabled.Setters.Add(new Setter(UIElement.OpacityProperty, 0.45, "Chrome"));
+        template.Triggers.Add(disabled);
+
+        return template;
     }
 
     private static SolidColorBrush Freeze(Color color)

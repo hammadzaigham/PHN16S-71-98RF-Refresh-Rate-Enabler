@@ -1,8 +1,99 @@
+using System.IO;
 using System.Runtime.InteropServices;
 
 internal static class NvidiaPanelTiming
 {
-    public static int Apply(IReadOnlyList<int> rates, IReadOnlyList<byte[]> descriptors)
+    private const uint InfoTypeDdsStatus = 0x17;
+
+    private static string? ResolveNvCplPath()
+    {
+        string programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        string[] searchPaths =
+        {
+            Path.Combine(programFiles, "NVIDIA Corporation", "NVIDIA App", "NvCpl", "nvcpl.dll"),
+            Path.Combine(programFiles, "NVIDIA Corporation", "Control Panel Client", "nvcpl.dll"),
+            Path.Combine(Environment.SystemDirectory, "nvcpl.dll")
+        };
+
+        foreach (string path in searchPaths)
+        {
+            if (File.Exists(path))
+                return path;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Queries NVIDIA Advanced Optimus (DDS) live MUX state via nvcpl.dll (matching PreySense's NvidiaDdsService).
+    /// Returns true if DDS reports a valid active MUX (MuxState 1 = Optimus/Intel, 2 = dGPU/NVIDIA).
+    /// </summary>
+    public static bool TryGetDdsActiveMux(out bool isNvidia)
+    {
+        isNvidia = false;
+        string? dllPath = ResolveNvCplPath();
+        if (dllPath == null)
+            return false;
+
+        nint lib = Native.LoadLibrary(dllPath);
+        if (lib == 0)
+            return false;
+
+        try
+        {
+            var init = TryBind<InitFn>(lib, "NvCplApiInit");
+            var close = TryBind<CloseFn>(lib, "NvCplApiClose");
+            var getInfo = TryBind<GetInfoFn>(lib, "NvCplApiGetInfo");
+            if (init == null || getInfo == null)
+                return false;
+
+            if (init() != 0)
+                return false;
+
+            try
+            {
+                ulong size = 16;
+                nint pStatus = Marshal.AllocHGlobal(16);
+                try
+                {
+                    for (int i = 0; i < 16; i++)
+                        Marshal.WriteByte(pStatus, i, 0);
+
+                    if (getInfo(InfoTypeDdsStatus, 0, pStatus, ref size) != 0)
+                        return false;
+
+                    var info = Marshal.PtrToStructure<NativeDdsStatusInfo>(pStatus);
+                    if (info.IsSupported == 0 || info.KmdResponse != 0)
+                        return false;
+
+                    if (info.MuxState == 2)
+                    {
+                        isNvidia = true;
+                        return true;
+                    }
+                    if (info.MuxState == 1)
+                    {
+                        isNvidia = false;
+                        return true;
+                    }
+                    return false;
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(pStatus);
+                }
+            }
+            finally
+            {
+                try { close?.Invoke(); } catch { }
+            }
+        }
+        finally
+        {
+            Native.FreeLibrary(lib);
+        }
+    }
+
+    public static int Apply(IReadOnlyList<int> rates, IReadOnlyList<byte[]> descriptors, string? deviceName = null)
     {
         if (rates.Count != descriptors.Count || rates.Count == 0)
         {
@@ -10,71 +101,89 @@ internal static class NvidiaPanelTiming
             return 1;
         }
 
-        nint lib = Native.LoadLibrary(@"C:\Windows\System32\nvcpl.dll");
+        string? dllPath = ResolveNvCplPath();
+        nint lib = dllPath != null ? Native.LoadLibrary(dllPath) : 0;
         if (lib == 0)
         {
             ProbeLog.Line("NVIDIA control panel library did not load. Nothing was written.");
             return 1;
         }
 
-        var init = Bind<InitFn>(lib, "NvCplApiInit");
-        var test = Bind<TestFn>(lib, "NvCplApiCTTest");
-        var clear = Bind<AddressFn>(lib, "NvCplApiClearAllUnsupportedResolutionsFromCacheForDisplay");
-        var flush = Bind<AddressFn>(lib, "NvCplApiFlushUnsupportedResolutionCacheToStorage");
+        string? targetDevice = string.IsNullOrWhiteSpace(deviceName) ? null : deviceName;
 
-        int rc = init(0, 0);
-        ProbeLog.Line("NvCplApiInit " + rc);
-        if (rc != 0)
-            return 1;
-
-        var before = CurrentMode();
-        ProbeLog.Line("Desktop before NVIDIA timings " + before.Width + "x" + before.Height + " @ " + before.Hz + " Hz, signal " + ActiveSignal());
-
-        var address = new Address { Gpu = 0, Display = 0 };
-        int failures = 0;
-        int saved = 0;
-        for (int i = 0; i < rates.Count; i++)
+        try
         {
-            Timing timing = FromDescriptor(rates[i], descriptors[i]);
-            int tested = test(ref address, 1, ref timing);
-            string signal = ActiveSignal();
-            int persisted = test(ref address, 6, ref timing);
-            var now = CurrentMode();
-            ProbeLog.Line(rates[i] + " Hz  test " + tested + ", save " + persisted
-                + ", clock " + timing.PixelClock.ToString("0.000") + " MHz, total "
-                + timing.HTotal + "x" + timing.VTotal + ", signal " + signal
-                + ", desktop " + now.Width + "x" + now.Height + " @ " + now.Hz);
-            if (tested != 0 || persisted != 0)
-                failures++;
-            else
-                saved++;
+            var init = Bind<InitFn>(lib, "NvCplApiInit");
+            var close = TryBind<CloseFn>(lib, "NvCplApiClose");
+            var test = Bind<TestFn>(lib, "NvCplApiCTTest");
+            var clear = Bind<AddressFn>(lib, "NvCplApiClearAllUnsupportedResolutionsFromCacheForDisplay");
+            var flush = Bind<AddressFn>(lib, "NvCplApiFlushUnsupportedResolutionCacheToStorage");
 
-            if (now.Hz != before.Hz || now.Width != before.Width || now.Height != before.Height)
+            int rc = init();
+            ProbeLog.Line("NvCplApiInit " + rc);
+            if (rc != 0)
+                return 1;
+
+            try
             {
-                int restored = Restore(before);
-                var after = CurrentMode();
-                ProbeLog.Line("Restored desktop " + restored + ", now " + after.Width + "x" + after.Height + " @ " + after.Hz);
+                Desktop before = CurrentMode(targetDevice);
+                ProbeLog.Line("Desktop before NVIDIA timings " + before.Width + "x" + before.Height + " @ " + before.Hz + " Hz, signal " + CcdSignal.DescribeAllTargets());
+
+                var address = new Address { Gpu = 0, Display = 0 };
+                int failures = 0;
+                int saved = 0;
+                for (int i = 0; i < rates.Count; i++)
+                {
+                    Timing timing = FromDescriptor(rates[i], descriptors[i]);
+                    int tested = test(ref address, 1, ref timing);
+                    string signal = CcdSignal.DescribeAllTargets();
+                    int persisted = test(ref address, 6, ref timing);
+                    Desktop now = CurrentMode(targetDevice);
+                    ProbeLog.Line(rates[i] + " Hz  test " + tested + ", save " + persisted
+                        + ", clock " + timing.PixelClock.ToString("0.000") + " MHz, total "
+                        + timing.HTotal + "x" + timing.VTotal + ", signal " + signal
+                        + ", desktop " + now.Width + "x" + now.Height + " @ " + now.Hz);
+                    if (tested != 0 || persisted != 0)
+                        failures++;
+                    else
+                        saved++;
+
+                    if (now.Hz != before.Hz || now.Width != before.Width || now.Height != before.Height)
+                    {
+                        int restored = Restore(targetDevice, before);
+                        Desktop after = CurrentMode(targetDevice);
+                        ProbeLog.Line("Restored desktop " + restored + ", now " + after.Width + "x" + after.Height + " @ " + after.Hz);
+                    }
+                }
+
+                int returned = RestoreRefresh(targetDevice, before, 240);
+                ProbeLog.Line("Desktop returned to 240 Hz, result " + returned + ", signal " + CcdSignal.DescribeAllTargets());
+
+                if (saved > 0)
+                {
+                    int cleared = clear(ref address);
+                    int flushed = flush(ref address);
+                    ProbeLog.Line("Cleared NVIDIA unsupported-resolution cache " + cleared + ", flush " + flushed + ". That cache is what turns VRR off.");
+                }
+
+                if (failures != 0)
+                {
+                    ProbeLog.Line(failures + " NVIDIA timing(s) were not accepted. Leave the NVIDIA GPU driving the panel and stage again.");
+                    return 1;
+                }
+
+                ProbeLog.Line("NVIDIA accepted " + string.Join(", ", rates) + " Hz at the panel pixel clock.");
+                return 0;
+            }
+            finally
+            {
+                try { close?.Invoke(); } catch { }
             }
         }
-
-        int returned = RestoreRefresh(240);
-        ProbeLog.Line("Desktop returned to 240 Hz, result " + returned + ", signal " + ActiveSignal());
-
-        if (saved > 0)
+        finally
         {
-            int cleared = clear(ref address);
-            int flushed = flush(ref address);
-            ProbeLog.Line("Cleared NVIDIA unsupported-resolution cache " + cleared + ", flush " + flushed + ". That cache is what turns VRR off.");
+            Native.FreeLibrary(lib);
         }
-
-        if (failures != 0)
-        {
-            ProbeLog.Line(failures + " NVIDIA timing(s) were not accepted. Leave the NVIDIA GPU driving the panel and stage again.");
-            return 1;
-        }
-
-        ProbeLog.Line("NVIDIA accepted " + string.Join(", ", rates) + " Hz at the panel pixel clock.");
-        return 0;
     }
 
     private static Timing FromDescriptor(int hz, byte[] descriptor)
@@ -120,69 +229,82 @@ internal static class NvidiaPanelTiming
         };
     }
 
-    private static T Bind<T>(nint module, string name) where T : Delegate
+    private static T? TryBind<T>(nint module, string name) where T : Delegate
     {
         nint address = Native.GetProcAddress(module, name);
-        if (address == 0)
-            throw new InvalidOperationException("nvcpl.dll is missing " + name);
-        return Marshal.GetDelegateForFunctionPointer<T>(address);
+        return address == 0 ? null : Marshal.GetDelegateForFunctionPointer<T>(address);
     }
 
-    private static string ActiveSignal()
-    {
-        if (Signal.GetDisplayConfigBufferSizes(2, out uint pathCount, out uint modeCount) != 0)
-            return "unavailable";
-        var paths = new byte[pathCount * 72];
-        var modes = new byte[modeCount * 64];
-        if (Signal.QueryDisplayConfig(2, ref pathCount, paths, ref modeCount, modes, 0) != 0)
-            return "unavailable";
+    private static T Bind<T>(nint module, string name) where T : Delegate
+        => TryBind<T>(module, name) ?? throw new InvalidOperationException("nvcpl.dll is missing " + name);
 
-        var parts = new List<string>();
-        for (int i = 0; i < modeCount; i++)
-        {
-            if (BitConverter.ToInt32(modes, i * 64) != 2)
-                continue;
-            ulong pixel = BitConverter.ToUInt64(modes, i * 64 + 16);
-            uint totalW = BitConverter.ToUInt32(modes, i * 64 + 48);
-            uint totalH = BitConverter.ToUInt32(modes, i * 64 + 52);
-            parts.Add(pixel + " Hz, " + totalW + "x" + totalH);
-        }
-        return parts.Count == 0 ? "no target" : string.Join("; ", parts);
-    }
-
-    private static Desktop CurrentMode()
+    private static Desktop CurrentMode(string? deviceName)
     {
-        var mode = new DevMode { dmSize = (short)Marshal.SizeOf<DevMode>() };
-        Signal.EnumDisplaySettingsW(null, -1, ref mode);
+        var mode = new Native.DevMode { dmSize = (short)Marshal.SizeOf<Native.DevMode>() };
+        Native.EnumDisplaySettings(deviceName, Native.EnumCurrentSettings, ref mode);
         return new Desktop(mode.dmPelsWidth, mode.dmPelsHeight, mode.dmDisplayFrequency, mode);
     }
 
-    private static int Restore(Desktop desktop)
+    private static int Restore(string? deviceName, Desktop desktop)
     {
-        DevMode mode = desktop.Raw;
-        return Signal.ChangeDisplaySettingsExW(null, ref mode, 0, 0, 0);
+        Native.DevMode mode = desktop.Raw;
+        return Native.ChangeDisplaySettingsEx(deviceName, ref mode, 0, 0, 0);
     }
 
-    private static int RestoreRefresh(int hz)
+    private static int RestoreRefresh(string? deviceName, Desktop before, int hz)
     {
+        int targetW = before.Width > 0 ? before.Width : 2560;
+        int targetH = before.Height > 0 ? before.Height : 1600;
+        Native.DevMode? fallback = null;
+
         for (int i = 0; ; i++)
         {
-            var mode = new DevMode { dmSize = (short)Marshal.SizeOf<DevMode>() };
-            if (!Signal.EnumDisplaySettingsW(null, i, ref mode))
-                return -1;
-            if (mode.dmPelsWidth == 2560 && mode.dmPelsHeight == 1600 && mode.dmDisplayFrequency == hz)
-                return Signal.ChangeDisplaySettingsExW(null, ref mode, 0, 0, 0);
+            var mode = new Native.DevMode { dmSize = (short)Marshal.SizeOf<Native.DevMode>() };
+            if (!Native.EnumDisplaySettings(deviceName, i, ref mode))
+                break;
+            if (mode.dmPelsWidth == targetW && mode.dmPelsHeight == targetH && mode.dmDisplayFrequency == hz)
+            {
+                fallback ??= mode;
+                if (mode.dmBitsPerPel == before.Raw.dmBitsPerPel
+                    && mode.dmDisplayOrientation == before.Raw.dmDisplayOrientation
+                    && mode.dmDisplayFixedOutput == before.Raw.dmDisplayFixedOutput)
+                {
+                    return Native.ChangeDisplaySettingsEx(deviceName, ref mode, 0, 0, 0);
+                }
+            }
         }
+
+        if (fallback is Native.DevMode fb)
+            return Native.ChangeDisplaySettingsEx(deviceName, ref fb, 0, 0, 0);
+        return Restore(deviceName, before);
     }
 
-    [UnmanagedFunctionPointer(CallingConvention.Winapi)]
-    private delegate int InitFn(int a, int b);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int InitFn();
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int CloseFn();
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int GetInfoFn(uint infoType, uint param, nint pData, ref ulong pSize);
 
     [UnmanagedFunctionPointer(CallingConvention.Winapi)]
     private delegate int AddressFn(ref Address address);
 
     [UnmanagedFunctionPointer(CallingConvention.Winapi)]
     private delegate int TestFn(ref Address address, int op, ref Timing timing);
+
+    [StructLayout(LayoutKind.Sequential, Pack = 1)]
+    private struct NativeDdsStatusInfo
+    {
+        public byte IsSupported;
+        public byte IsAutomatic;
+        public byte Reserved1;
+        public byte Reserved2;
+        public uint MuxState;
+        public uint KmdResponse;
+        public uint SrType;
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct Address
@@ -220,64 +342,5 @@ internal static class NvidiaPanelTiming
         [FieldOffset(0x60)] public uint Ce;
     }
 
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct DevMode
-    {
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string? dmDeviceName;
-        public short dmSpecVersion;
-        public short dmDriverVersion;
-        public short dmSize;
-        public short dmDriverExtra;
-        public int dmFields;
-        public int dmPositionX;
-        public int dmPositionY;
-        public int dmDisplayOrientation;
-        public int dmDisplayFixedOutput;
-        public short dmColor;
-        public short dmDuplex;
-        public short dmYResolution;
-        public short dmTTOption;
-        public short dmCollate;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string? dmFormName;
-        public short dmLogPixels;
-        public int dmBitsPerPel;
-        public int dmPelsWidth;
-        public int dmPelsHeight;
-        public int dmDisplayFlags;
-        public int dmDisplayFrequency;
-        public int dmICMMethod;
-        public int dmICMIntent;
-        public int dmMediaType;
-        public int dmDitherType;
-        public int dmReserved1;
-        public int dmReserved2;
-        public int dmPanningWidth;
-        public int dmPanningHeight;
-    }
-
-    private readonly record struct Desktop(int Width, int Height, int Hz, DevMode Raw);
-
-    private static class Native
-    {
-        [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
-        public static extern nint LoadLibrary(string path);
-
-        [DllImport("kernel32", CharSet = CharSet.Ansi, SetLastError = true)]
-        public static extern nint GetProcAddress(nint module, string name);
-    }
-
-    private static class Signal
-    {
-        [DllImport("user32", CharSet = CharSet.Unicode)]
-        public static extern bool EnumDisplaySettingsW(string? device, int mode, ref DevMode devMode);
-
-        [DllImport("user32", CharSet = CharSet.Unicode)]
-        public static extern int ChangeDisplaySettingsExW(string? device, ref DevMode devMode, nint hwnd, int flags, nint param);
-
-        [DllImport("user32")]
-        public static extern int GetDisplayConfigBufferSizes(uint flags, out uint pathCount, out uint modeCount);
-
-        [DllImport("user32")]
-        public static extern int QueryDisplayConfig(uint flags, ref uint pathCount, byte[] paths, ref uint modeCount, byte[] modes, nint topology);
-    }
+    private readonly record struct Desktop(int Width, int Height, int Hz, Native.DevMode Raw);
 }

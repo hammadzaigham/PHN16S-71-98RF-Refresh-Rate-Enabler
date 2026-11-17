@@ -8,7 +8,7 @@ On the Intel GPU, Windows lists every mode: 240 Hz, 165.02 Hz, 144 Hz, 120 Hz, 1
 
 The laptop has an Intel GPU and an NVIDIA GeForce RTX 5070 Ti Laptop GPU. Add the rates once for each GPU.
 
-You need Windows 11 and the .NET 10 desktop runtime. The app asks for administrator approval. Download [v1.0.0](https://github.com/hammadzaigham/PHN16S-71-98RF-Refresh-Rate-Enabler/releases/tag/v1.0.0).
+You need Windows 11 and the .NET 10 desktop runtime. The app asks for administrator approval. Download [v1.1.0](https://github.com/hammadzaigham/PHN16S-71-98RF-Refresh-Rate-Enabler/releases/tag/v1.1.0).
 
 ## How to use
 

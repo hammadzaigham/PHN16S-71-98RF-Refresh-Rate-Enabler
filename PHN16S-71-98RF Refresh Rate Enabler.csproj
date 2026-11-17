@@ -10,6 +10,7 @@
     <AssemblyName>PHN16S-71-98RF Refresh Rate Enabler</AssemblyName>
     <RootNamespace>PHN16S7198RFRefreshRateEnabler</RootNamespace>
     <PlatformTarget>x64</PlatformTarget>
+    <Version>1.1.0</Version>
     <ApplicationTitle>PHN16S-71-98RF Refresh Rate Enabler</ApplicationTitle>
   </PropertyGroup>
 </Project>
